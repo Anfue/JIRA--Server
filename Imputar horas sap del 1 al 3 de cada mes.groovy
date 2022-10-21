@@ -1,0 +1,160 @@
+import com.atlassian.jira.issue.CustomFieldManager
+import com.atlassian.jira.issue.Issue
+import com.atlassian.jira.issue.MutableIssue
+import com.atlassian.jira.issue.fields.CustomField
+import com.atlassian.crowd.embedded.api.User
+import com.atlassian.jira.project.Project 
+import com.atlassian.jira.component.ComponentAccessor
+import org.apache.log4j.Category;
+import com.atlassian.jira.config.SubTaskManager
+import com.atlassian.jira.config.util.JiraHome
+import com.atlassian.jira.event.type.EventDispatchOption
+import com.atlassian.jira.issue.IssueFactory
+import com.atlassian.jira.issue.IssueManager
+import com.atlassian.jira.issue.ModifiedValue
+import com.atlassian.jira.issue.MutableIssue
+import com.atlassian.jira.issue.util.DefaultIssueChangeHolder
+import com.atlassian.jira.security.JiraAuthenticationContext
+import Helper.WSHelper
+import groovy.transform.Field
+import Helper.BDHelper
+import com.atlassian.jira.issue.ModifiedValue
+import com.onresolve.scriptrunner.runner.util.UserMessageUtil
+import com.atlassian.jira.issue.fields.WorklogSystemField
+import Helper.CommonHelper
+import com.atlassian.jira.issue.worklog.Worklog
+import com.opensymphony.workflow.InvalidInputException
+
+
+//log + cabecera
+String rutaLogs						= ComponentAccessor.getComponentOfType(JiraHome.class).getHomePath()+"/scripts/groovy/logs/";
+String nombreScript					= "MFS_HDEV_IncurrirHorasSap";
+Date d								= new Date();
+File logz							= new File(rutaLogs+nombreScript+".log")
+String currentUser					= ComponentAccessor.getJiraAuthenticationContext().getLoggedInUser().getName()
+String cabecera						= d.format("HH:mm:ss") + " usuario :" + currentUser
+
+def cfFacturable					= ComponentAccessor.getCustomFieldManager().getCustomFieldObject(10501L)
+def facturable						= issue.getCustomFieldValue(cfFacturable)
+if(facturable){
+	//manejadores + class helper bbdd y sap
+    def WSHelper wsh 				= new WSHelper()
+    @Field BDHelper bdh 			= new BDHelper()
+    @Field CommonHelper ch			= new CommonHelper()
+
+    def projectManager 				= ComponentAccessor.projectManager
+    def user 						= ComponentAccessor.jiraAuthenticationContext.getLoggedInUser()
+    CustomFieldManager cfManager 	= ComponentAccessor.getCustomFieldManager();
+    def groupManager				= ComponentAccessor.getGroupManager();
+    def worklogManager				= ComponentAccessor.getWorklogManager()
+
+    //customfields
+    def cfTipoEstimacion			= cfManager.getCustomFieldObject(13001L)
+    def cfCodReserva				= cfManager.getCustomFieldObject(13500L)
+    def cfPosicionReserva			= cfManager.getCustomFieldObject(13501L)
+    def cfEnv_cod_tarifa			= cfManager.getCustomFieldObject(13009L)
+    def cfHorasPendientesApr		= cfManager.getCustomFieldObject(13006L)
+
+    //value customfields
+    def tipoEstimacion				= issue.getCustomFieldValue(cfTipoEstimacion).toString()
+    def codTarifa					= issue.getCustomFieldValue(cfEnv_cod_tarifa)==null ? "":issue.getCustomFieldValue(cfEnv_cod_tarifa)
+    def posicionReserva				= issue.getCustomFieldValue(cfPosicionReserva)==null ? "":issue.getCustomFieldValue(cfPosicionReserva)
+    def CodReserva					= issue.getCustomFieldValue(cfCodReserva)==null ? "":issue.getCustomFieldValue(cfCodReserva)
+    double horasPendienteApr		= (issue.getCustomFieldValue(cfHorasPendientesApr)==null ? 0:(double)issue.getCustomFieldValue(cfHorasPendientesApr))
+
+    //recogemos incurrido y fecha
+    def worklog						= worklogManager.getByIssue(issue)
+    def timeSegundos				= worklog.last().timeSpent
+    def time						= timeSegundos.div(3600).round(3) //timeSegundos/3600 
+    def date						= worklog.last().startDate.format('yyyy-MM-dd')
+    def result
+    def codImputacion
+
+    log.error('WOKLOG COMPLETO->'+worklog)
+	log.error('0 worklog estimado->'+worklog.timeSpent+', ultimo WorkLog->'+timeSegundos)
+	def TiempoLogado = worklog.timeSpent[0] // es el tiempo que queda despues de una petición de usuario rechazada
+
+    def MSGTY = "" //gestion errores
+    def MESSAGE = "" //gestion errores
+
+    //enviamos incurrido a sap
+    if("Externa".equals(tipoEstimacion)){
+        log.warn "WS Script anulacion horas"
+        log.warn("CodReserva: ${CodReserva} posicionReserva: ${posicionReserva} codTarifa: ${codTarifa}  time: ${time}  timeSegundos: ${timeSegundos}")
+        result =   wsh.ZMFS_INT_CONSUM_ANUL_HORAS('','',CodReserva.toString(),posicionReserva.toString(),'',codTarifa.toString(),time.toString(),date.toString())[1]
+        //log.warn("Result: ${result}")
+    }
+
+    //recogemos resultado incurrido (codImputacion)
+    def parser = new XmlParser()
+    def items = parser.parseText(result).depthFirst().findAll { it.name() == 'item' }
+    //log.warn("Items: ${items}")
+        items.each(){
+            codImputacion = getValue(it.LBLNI.toString())
+             MSGTY =  it.MSGTY.toString()     //gestion errores
+             MESSAGE = it.MESSAGE.toString()   //gestion errores
+            //log.warn("MSGTY dentro: ${MSGTY}")
+        }
+    //log.warn("MSGTY fuera: ${MSGTY}")
+
+    if( !MSGTY.toString().contains("E")){ //gestion errores
+        //registramos incurrido en bbdd
+        def SQL = "INSERT INTO [dbo].[INC_GES_HORAS] ([ID Estimacion],[SRVPOS],[EBELN],[EBELP],[LBLNI],[H_INCURRIDAS],[FECHA_INCURRIDO],[ESTADO_INCURRIDO]) VALUES('"+issue.id+"','"+codTarifa+"','"+CodReserva+"','"+posicionReserva+"','"+codImputacion+"','"+time+"','"+date+"','1');"
+        log.debug(SQL)
+        bdh.executeHalley(SQL)
+		
+        log.error('Entra y no devuelve error')
+        //registramos horas pendientes aprobación
+        if(horasPendienteApr==null){
+            horasPendienteApr = time
+        }else{
+            horasPendienteApr = horasPendienteApr+time
+
+        }
+
+        log.error('HorasPendienteApr --->' +horasPendienteApr) 
+        issue.setCustomFieldValue(cfHorasPendientesApr, horasPendienteApr)
+        ComponentAccessor.getIssueManager().updateIssue(ComponentAccessor.getJiraAuthenticationContext().getLoggedInUser(), issue, EventDispatchOption.DO_NOT_DISPATCH, false);
+        
+        // Calculamos el remaining estimate por si han tocado el ajuste automático en la pantalla de worklog
+    	// Long tiempoEO = issue.getOriginalEstimate()	// Estimación original
+    	// Long tiempoTT = issue.getTimeSpent()		// Tiempo trabajado
+		// issue.setEstimate(tiempoEO-tiempoTT)		// Calculamos el remaining
+
+    }else{
+		// mostrar   MESSAGE
+		log.error('1 worklog estimado->'+worklog.timeSpent+', ultimo WorkLog->'+timeSegundos)
+		log.error('Entra y devuelve error- time spent->'+worklog.timeSpent)
+        deleteLastWorkLog(issue, TiempoLogado)
+        log.error('2 worklog estimado->'+worklog.timeSpent+', ultimo WorkLog->'+timeSegundos)
+        // throw new InvalidInputException("El tiempo incurrido no puede superar las horas reservadas.")
+		log.warn("###MESSAGE DENTRO: ${MSGTY}")    
+        log.warn("###MESSAGE DENTRO: ${MESSAGE}")    
+        ch.message(MESSAGE.toString().split("=")[2].replaceAll("\\[","").replaceAll("\\]",""),3)
+    	def errorflag= ComponentAccessor.getCustomFieldManager().getCustomFieldObject(13601)
+    	errorflag.updateValue(null, issue, new ModifiedValue(null, MESSAGE),new DefaultIssueChangeHolder())
+    }
+}
+
+//metodo get valor llamada SAP
+def String getValue(Object node){
+    if(node.size() >0){
+    	return node.toString().split("value=")[1].replaceAll("\\[", "").replaceAll("\\]", "")
+    }else{
+    	return "-"
+    }
+}
+
+void deleteLastWorkLog (Issue issue, Long TiempoLogado){
+		List<Worklog> logsForIssue = ComponentAccessor.getWorklogManager().getByIssue(issue)
+		Worklog lastWorklog = logsForIssue.get(logsForIssue.size() - 1)
+    	log.error('logsForIssue.get(logsForIssue.size() - 1 --->' +logsForIssue.get(logsForIssue.size() - 1))
+		//log.error('logsForIssue.get(logsForIssue.size() - 2 --->' +logsForIssue.get(logsForIssue.size() - 2))
+    	Long tiempoEstimado = issue.getEstimate() //Estimación restante
+    	log.error('TiempoEstimado correcto --->' +tiempoEstimado)
+   		log.error('TiempoLogado->'+TiempoLogado)
+    	ComponentAccessor.getWorklogManager().delete(ComponentAccessor.getJiraAuthenticationContext().getLoggedInUser(), lastWorklog, tiempoEstimado, false)
+    	log.error('Time Spent antes->'+issue.getTimeSpent())
+		issue.setTimeSpent(TiempoLogado)
+    	log.error('Time Spent despés->'+issue.getTimeSpent())
+}

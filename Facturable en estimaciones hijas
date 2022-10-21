@@ -1,0 +1,34 @@
+import com.atlassian.jira.issue.CustomFieldManager
+import com.atlassian.jira.component.ComponentAccessor
+import java.util.Collection;
+import org.apache.log4j.Logger
+import com.atlassian.jira.issue.ModifiedValue
+import com.atlassian.jira.issue.util.DefaultIssueChangeHolder
+
+def issue = ComponentAccessor.getIssueManager().getIssueByCurrentKey("HDEV-188072")  // estimacion 192022 projecto 188072
+Collection subTasks = issue.getSubTaskObjects()
+def cfFacturable = ComponentAccessor.getCustomFieldManager().getCustomFieldObject(10501L)
+def st
+boolean facturable = issue.getCustomFieldValue(cfFacturable) != null ? (boolean) issue.getCustomFieldValue(cfFacturable)[0] : false//.getAt(0)
+def val_facturable = issue.getCustomFieldValue(cfFacturable)
+def facturableST
+for(def x = 0 ; x < subTasks.size(); x++){
+    facturableST = subTasks[x].getCustomFieldValue(cfFacturable)
+    st = ComponentAccessor.getIssueManager().getIssueByCurrentKey(subTasks[x].toString())
+    if(subTasks[x].issueType.name.equals('Estimación')){
+        if(val_facturable == facturableST ){
+        	log.info ('Parent '+issue+' ¿es facturable? '+val_facturable+' y issue = '+subTasks[x]+', tipo '+subTasks[x].issueType.name +', ¿es facturable? '+facturableST)        
+        }else{
+            log.info('No son iguales Proyecto y Epica, asi que se debe actualizar la estimacion')
+            cfFacturable.updateValue(null,st, new ModifiedValue(st.getCustomFieldValue(cfFacturable), ),new DefaultIssueChangeHolder());
+        }
+    	
+    }   
+}
+
+
+
+
+
+
+
