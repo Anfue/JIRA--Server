@@ -1,0 +1,20 @@
+import com.atlassian.jira.component.ComponentAccessor
+import com.atlassian.jira.user.ApplicationUser
+import com.atlassian.jira.user.util.UserManager
+import com.atlassian.crowd.embedded.api.Group
+
+
+def groupManager = ComponentAccessor.getGroupManager()
+def userManager = ComponentAccessor.getUserManager()
+
+def usersInGroup1 = groupManager.getUsersInGroup("ESTRUCTURAL")
+log.warn(usersInGroup1)
+def systems = groupManager.getGroup("ADD TO THIS GROUP")
+
+Collection<ApplicationUser> Group1 = usersInGroup1
+
+for (ApplicationUser Users1 : Group1){
+
+log.warn('Users->'+Users1.emailAddress)
+
+}
